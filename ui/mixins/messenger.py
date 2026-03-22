@@ -21,7 +21,6 @@ from net.net import (
 )
 from textual.widgets import Button, Input, ListItem, ListView, Log, Static
 
-from ui.constants import SPINNER_FRAMES
 
 
 class MessengerMixin:
