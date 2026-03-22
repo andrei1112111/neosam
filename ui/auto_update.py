@@ -21,7 +21,13 @@ STATUS_CHECKING = "проверяем наличие обновлений..."
 STATUS_DOWNLOADING = "загрузка обновления..."
 STATUS_DOWNLOAD_ERROR = "ошибка скачивания обновления"
 STATUS_LOOKUP_ERROR = "ошибка поиска новой версии приложения"
-STATUS_UP_TO_DATE = "версия neosam актуальна"
+
+
+def format_up_to_date_status(version_title: str) -> str:
+    clean_title = version_title.strip()
+    if not clean_title:
+        clean_title = "version unknown"
+    return f"✓ {clean_title}"
 
 PRESERVED_ROOT_NAMES = {
     ".git",
@@ -29,6 +35,11 @@ PRESERVED_ROOT_NAMES = {
     ".update_pending.json",
     "VERSION",
     "my_database.db",
+}
+
+PRESERVED_RELATIVE_PATHS = {
+    Path("my_database.db"),
+    Path("net/.sam_identity.json"),
 }
 
 IGNORED_DIR_NAMES = {
@@ -226,6 +237,8 @@ class AutoUpdater:
                 continue
 
             destination_path = destination_root / source_path.name
+            if self._is_preserved_path(destination_path):
+                continue
             if source_path.is_dir():
                 destination_path.mkdir(parents=True, exist_ok=True)
                 self._copy_release_tree(source_path, destination_path)
@@ -233,3 +246,10 @@ class AutoUpdater:
 
             destination_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, destination_path)
+
+    def _is_preserved_path(self, path: Path) -> bool:
+        try:
+            relative = path.resolve().relative_to(self.project_root.resolve())
+        except ValueError:
+            return False
+        return relative in PRESERVED_RELATIVE_PATHS

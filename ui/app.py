@@ -21,11 +21,11 @@ from ui.auto_update import (
     AutoUpdater,
     ReleaseDownloadError,
     ReleaseLookupError,
+    format_up_to_date_status,
     STATUS_CHECKING,
     STATUS_DOWNLOADING,
     STATUS_DOWNLOAD_ERROR,
     STATUS_LOOKUP_ERROR,
-    STATUS_UP_TO_DATE,
 )
 from ui.i2p_status import collect_i2p_status, format_i2p_header
 from ui.mixins import StartupMixin
@@ -728,7 +728,7 @@ class CMD_UI(StartupMixin, App):
             return
 
         if release is None or release.title == current_version:
-            self._update_auto_update_status(STATUS_UP_TO_DATE)
+            self._update_auto_update_status(format_up_to_date_status(current_version))
             return
 
         self._update_auto_update_status(STATUS_DOWNLOADING)
