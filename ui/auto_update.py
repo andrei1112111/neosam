@@ -14,7 +14,7 @@ from pathlib import Path
 GITHUB_API_LATEST_RELEASE = (
     "https://api.github.com/repos/andrei1112111/neosam/releases/latest"
 )
-REQUIRED_RELEASE_TAG = "reliase"
+REQUIRED_RELEASE_TAG_PREFIX = "reliase"
 PENDING_UPDATE_FILE = ".update_pending.json"
 
 STATUS_CHECKING = "проверяем наличие обновлений..."
@@ -74,11 +74,11 @@ class AutoUpdater:
         *,
         project_root: Path,
         api_url: str = GITHUB_API_LATEST_RELEASE,
-        required_tag: str = REQUIRED_RELEASE_TAG,
+        required_tag_prefix: str = REQUIRED_RELEASE_TAG_PREFIX,
     ) -> None:
         self.project_root = project_root
         self.api_url = api_url
-        self.required_tag = required_tag
+        self.required_tag_prefix = required_tag_prefix
         self.version_file = self.project_root / "VERSION"
         self.pending_file = self.project_root / PENDING_UPDATE_FILE
 
@@ -127,7 +127,7 @@ class AutoUpdater:
         if not title or not zipball_url:
             raise ReleaseLookupError("latest release payload is incomplete")
 
-        if tag_name != self.required_tag:
+        if not tag_name.startswith(self.required_tag_prefix):
             return None
 
         return ReleaseInfo(
