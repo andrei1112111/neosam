@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,16 @@ from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Button, Static, TextArea
 
+from ui.auto_update import (
+    AutoUpdater,
+    ReleaseDownloadError,
+    ReleaseLookupError,
+    STATUS_CHECKING,
+    STATUS_DOWNLOADING,
+    STATUS_DOWNLOAD_ERROR,
+    STATUS_LOOKUP_ERROR,
+    STATUS_UP_TO_DATE,
+)
 from ui.i2p_status import collect_i2p_status, format_i2p_header
 from ui.mixins import StartupMixin
 from ui.pages import quick_start
@@ -203,6 +214,18 @@ class CMD_UI(StartupMixin, App):
         width: 100%;
         height: 1;
     }
+
+    #profile-footer-left {
+        width: 1fr;
+        height: 1;
+        content-align: left middle;
+    }
+
+    #profile-footer-right {
+        width: auto;
+        height: 1;
+        content-align: right middle;
+    }
     """
 
     def __init__(self) -> None:
@@ -214,15 +237,19 @@ class CMD_UI(StartupMixin, App):
         self.new_chat_mode: str | None = None
 
         self.settings_row: Settings | None = None
+        self.project_root = Path(__file__).resolve().parents[1]
         self.identity_path = Path("net/.sam_identity.json")
+        self.auto_updater = AutoUpdater(project_root=self.project_root)
         self.net: Net | None = None
         self.net_error: str | None = None
         self.last_invite_json: str | None = None
+        self.update_status = STATUS_CHECKING
         self._bootstrap_task: asyncio.Task[None] | None = None
         self._network_status_task: asyncio.Task[None] | None = None
         self._net_event_task: asyncio.Task[None] | None = None
         self._net_init_task: asyncio.Task[bool] | None = None
         self._invite_action_task: asyncio.Task[None] | None = None
+        self._auto_update_task: asyncio.Task[None] | None = None
 
     def compose(self) -> ComposeResult:
         with Container(id="startup-shell"):
@@ -281,7 +308,9 @@ class CMD_UI(StartupMixin, App):
                             yield Static("", id="join-error")
                         yield Static("", id="new-chat-status")
                     yield Static(id="new-chat-bottom-spacer")
-            yield Static("- | Sam ip: -", id="profile-footer")
+            with Horizontal(id="profile-footer"):
+                yield Static("- | Sam ip: -", id="profile-footer-left")
+                yield Static(self.update_status, id="profile-footer-right")
 
     async def on_mount(self) -> None:
         self.settings_row = self._ensure_settings_row()
@@ -311,6 +340,12 @@ class CMD_UI(StartupMixin, App):
             self._invite_action_task.cancel()
             try:
                 await self._invite_action_task
+            except asyncio.CancelledError:
+                pass
+        if self._auto_update_task:
+            self._auto_update_task.cancel()
+            try:
+                await self._auto_update_task
             except asyncio.CancelledError:
                 pass
         if self._net_event_task:
@@ -346,6 +381,8 @@ class CMD_UI(StartupMixin, App):
         self._show_chat_home()
         if self._network_status_task is None or self._network_status_task.done():
             self._network_status_task = asyncio.create_task(self._network_status_loop())
+        if self._auto_update_task is None or self._auto_update_task.done():
+            self._auto_update_task = asyncio.create_task(self._run_auto_update())
 
     async def _finish_startup(self) -> None:
         if self.settings_row and not self.settings_row.initialized:
@@ -665,9 +702,52 @@ class CMD_UI(StartupMixin, App):
             address = profile.user.address or "-"
             username = profile.user.username or "-"
 
-        self.query_one("#profile-footer", Static).update(
+        self.query_one("#profile-footer-left", Static).update(
             f"{self._format_username(username)} | Sam ip: {self._format_address(address)}"
         )
+
+    def _update_auto_update_status(self, text: str) -> None:
+        self.update_status = text
+        try:
+            self.query_one("#profile-footer-right", Static).update(text)
+        except Exception:
+            return
+
+    async def _run_auto_update(self) -> None:
+        self._update_auto_update_status(STATUS_CHECKING)
+        try:
+            await asyncio.to_thread(self.auto_updater.finalize_pending_update)
+        except Exception:
+            pass
+
+        current_version = await asyncio.to_thread(self.auto_updater.read_local_version)
+        try:
+            release = await asyncio.to_thread(self.auto_updater.fetch_latest_release)
+        except ReleaseLookupError:
+            self._update_auto_update_status(STATUS_LOOKUP_ERROR)
+            return
+
+        if release is None or release.title == current_version:
+            self._update_auto_update_status(STATUS_UP_TO_DATE)
+            return
+
+        self._update_auto_update_status(STATUS_DOWNLOADING)
+        try:
+            await asyncio.to_thread(
+                self.auto_updater.download_and_apply_release,
+                release,
+            )
+        except ReleaseDownloadError:
+            self._update_auto_update_status(STATUS_DOWNLOAD_ERROR)
+            return
+
+        self._restart_updated_app()
+
+    def _restart_updated_app(self) -> None:
+        argv = sys.argv[:] if sys.argv else [str(self.project_root / "main.py")]
+        if not argv or not argv[0] or argv[0] == "-c":
+            argv = [str(self.project_root / "main.py")]
+        os.execv(sys.executable, [sys.executable, *argv])
 
     def _show_chat_home(self) -> None:
         self.current_view = "home"
