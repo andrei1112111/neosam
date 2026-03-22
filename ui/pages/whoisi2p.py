@@ -36,11 +36,24 @@ class WhoIsI2P(Widget):
         height: 100%;
     }
 
+    #welcome-top-row {
+        width: 100%;
+        height: auto;
+    }
+
     #welcome-index {
-        width: auto;
+        width: 1fr;
         content-align: left top;
         text-style: bold;
         margin: 1 0 0 1;
+    }
+
+    #close-app {
+        width: auto;
+        border: none;
+        background: transparent;
+        text-style: bold;
+        margin: 1 1 0 0;
     }
 
     /* Скроллируемый контейнер для контента */
@@ -123,7 +136,9 @@ class WhoIsI2P(Widget):
     def compose(self) -> ComposeResult:
         with Container(id="welcome-layout"):
             with Vertical(id="welcome-stack"):
-                yield Static("i2p", id="welcome-index")
+                with Horizontal(id="welcome-top-row"):
+                    yield Static("i2p", id="welcome-index")
+                    yield Button("[ закрыть ]", id="close-app")
                 
                 # Распорка сверху
                 yield Static(id="top-spacer")

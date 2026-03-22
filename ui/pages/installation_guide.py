@@ -48,11 +48,24 @@ class InstallationGuide_macos(Widget):
         height: 100%;
     }
 
+    #welcome-top-row {
+        width: 100%;
+        height: auto;
+    }
+
     #welcome-index {
-        width: auto;
+        width: 1fr;
         content-align: left top;
         text-style: bold;
         margin: 1 0 0 1;
+    }
+
+    #close-app {
+        width: auto;
+        border: none;
+        background: transparent;
+        text-style: bold;
+        margin: 1 1 0 0;
     }
 
     /* Скроллируемый контейнер для контента */
@@ -145,7 +158,9 @@ class InstallationGuide_macos(Widget):
     def compose(self) -> ComposeResult:
         with Container(id="welcome-layout"):
             with Vertical(id="welcome-stack"):
-                yield Static("установка на <MACOS> linux windows", id="welcome-index")
+                with Horizontal(id="welcome-top-row"):
+                    yield Static("установка на <MACOS> linux windows", id="welcome-index")
+                    yield Button("[ закрыть ]", id="close-app")
                 
                 # Распорка сверху
                 yield Static(id="top-spacer")
@@ -195,11 +210,24 @@ class InstallationGuide_linux(Widget):
         height: 100%;
     }
 
+    #welcome-top-row {
+        width: 100%;
+        height: auto;
+    }
+
     #welcome-index {
-        width: auto;
+        width: 1fr;
         content-align: left top;
         text-style: bold;
         margin: 1 0 0 1;
+    }
+
+    #close-app {
+        width: auto;
+        border: none;
+        background: transparent;
+        text-style: bold;
+        margin: 1 1 0 0;
     }
 
     /* Скроллируемый контейнер для контента */
@@ -292,7 +320,9 @@ class InstallationGuide_linux(Widget):
     def compose(self) -> ComposeResult:
         with Container(id="welcome-layout"):
             with Vertical(id="welcome-stack"):
-                yield Static("установка на macos <LINUX>, windows", id="welcome-index")
+                with Horizontal(id="welcome-top-row"):
+                    yield Static("установка на macos <LINUX>, windows", id="welcome-index")
+                    yield Button("[ закрыть ]", id="close-app")
                 
                 # Распорка сверху
                 yield Static(id="top-spacer")
@@ -330,11 +360,24 @@ class InstallationGuide_windown(Widget):
         height: 100%;
     }
 
+    #welcome-top-row {
+        width: 100%;
+        height: auto;
+    }
+
     #welcome-index {
-        width: auto;
+        width: 1fr;
         content-align: left top;
         text-style: bold;
         margin: 1 0 0 1;
+    }
+
+    #close-app {
+        width: auto;
+        border: none;
+        background: transparent;
+        text-style: bold;
+        margin: 1 1 0 0;
     }
 
     /* Скроллируемый контейнер для контента */
@@ -427,7 +470,9 @@ class InstallationGuide_windown(Widget):
     def compose(self) -> ComposeResult:
         with Container(id="welcome-layout"):
             with Vertical(id="welcome-stack"):
-                yield Static("установка на macos linux <WINDOWS>", id="welcome-index")
+                with Horizontal(id="welcome-top-row"):
+                    yield Static("установка на macos linux <WINDOWS>", id="welcome-index")
+                    yield Button("[ закрыть ]", id="close-app")
                 
                 # Распорка сверху
                 yield Static(id="top-spacer")
