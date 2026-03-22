@@ -1,9 +1,3 @@
-pip install textual
-pip install cryptography
-pip install peewee
-
-//
-
-brew install i2pd
-brew services stop i2pd 
-i2pd --http.address=127.0.0.1 --http.port=7070 --sam.enabled=1 --sam.port=7656
+textual
+cryptography
+peewee
