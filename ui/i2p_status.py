@@ -7,6 +7,8 @@ import urllib.error
 import urllib.request
 from html import unescape
 
+from rich.text import Text
+
 
 async def collect_i2p_status() -> dict[str, str]:
     zero_metrics = zero_i2p_status()
@@ -22,14 +24,28 @@ async def collect_i2p_status() -> dict[str, str]:
     return metrics
 
 
-def format_i2p_header(status: dict[str, str]) -> str:
-    return (
-        f"TQSR {status['tunnel_success_rate']} | "
-        f"Received {status['received']} | "
-        f"Sent {status['sent']} | "
-        f"Routers {status['routers']} | "
-        f"Floodfills {status['floodfills']}"
+def format_i2p_header(status: dict[str, str]) -> Text:
+    tqsr_value = status["tunnel_success_rate"]
+    routers_value = status["routers"]
+    floodfills_value = status["floodfills"]
+    header = Text()
+    header.append(
+        f"TQSR {tqsr_value}",
+        style=_tqsr_style(tqsr_value),
     )
+    header.append(f" | Received {status['received']}")
+    header.append(f" | Sent {status['sent']}")
+    header.append(" | ")
+    header.append(
+        f"Routers {routers_value}",
+        style=_routers_style(routers_value),
+    )
+    header.append(" | ")
+    header.append(
+        f"Floodfills {floodfills_value}",
+        style=_floodfills_style(floodfills_value),
+    )
+    return header
 
 
 def zero_i2p_status() -> dict[str, str]:
@@ -124,3 +140,49 @@ def _find_value(text: str, patterns: tuple[str, ...]) -> str:
         if match:
             return match.group(1).strip()
     return "0"
+
+
+def _tqsr_style(value: str) -> str:
+    normalized = value.strip().replace("%", "").replace(",", ".")
+    try:
+        percent = float(normalized)
+    except ValueError:
+        return ""
+
+    if percent < 20:
+        return "red"
+    if percent < 50:
+        return "yellow"
+    return "green"
+
+
+def _routers_style(value: str) -> str:
+    count = _parse_int_metric(value)
+    if count is None:
+        return ""
+    if count < 200:
+        return "red"
+    if count < 600:
+        return "yellow"
+    return "green"
+
+
+def _floodfills_style(value: str) -> str:
+    count = _parse_int_metric(value)
+    if count is None:
+        return ""
+    if count < 100:
+        return "red"
+    if count < 300:
+        return "yellow"
+    return "green"
+
+
+def _parse_int_metric(value: str) -> int | None:
+    digits = re.sub(r"[^0-9]", "", value)
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None

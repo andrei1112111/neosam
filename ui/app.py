@@ -13,6 +13,7 @@ from db import MyProfile, Settings, User
 from net.i2p_sam import SAM_HOST, SAM_PORT, SAMIdentity
 from net.net import EVENT_ERROR, EVENT_SECURE_READY, Net
 from rich.align import Align
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Button, Static, TextArea
@@ -709,7 +710,10 @@ class CMD_UI(StartupMixin, App):
     def _update_auto_update_status(self, text: str) -> None:
         self.update_status = text
         try:
-            self.query_one("#profile-footer-right", Static).update(text)
+            renderable: str | Text = text
+            if text.startswith("✓ "):
+                renderable = Text(text, style="green")
+            self.query_one("#profile-footer-right", Static).update(renderable)
         except Exception:
             return
 
@@ -871,7 +875,7 @@ class CMD_UI(StartupMixin, App):
     @staticmethod
     def _format_network_header(status: dict[str, str]):
         if status.get("connected") != "1":
-            return Align.center("нет подключения")
+            return Align.center(Text("нет подключения", style="bold red"))
         return format_i2p_header(status)
 
     @staticmethod
