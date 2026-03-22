@@ -18,6 +18,7 @@ try:
         SAM_PORT,
         SAMIdentity,
         SAMIncomingPacket,
+        SAMProtocolError,
         SAMTransport,
         SAMWireFormatError,
         decode_message,
@@ -33,6 +34,7 @@ except ModuleNotFoundError:
         SAM_PORT,
         SAMIdentity,
         SAMIncomingPacket,
+        SAMProtocolError,
         SAMTransport,
         SAMWireFormatError,
         decode_message,
@@ -376,7 +378,12 @@ class Net:
             package=reply_package,
         )
         try:
-            await self._send_packet(peer_address, reply_packet, force_plain=True)
+            await self._send_packet_with_destination_retry(
+                peer_address,
+                reply_packet,
+                force_plain=True,
+                wait_timeout=90.0,
+            )
             if peer_username:
                 peer = self.get_or_create_peer(peer_address, username=peer_username)
                 self._touch_peer_online(peer)
@@ -464,7 +471,12 @@ class Net:
             username=self.local_user.username,
             sent_at=self._now().isoformat(),
         )
-        await self._send_packet(peer_address, request, require_secure=True)
+        await self._send_packet_with_destination_retry(
+            peer_address,
+            request,
+            require_secure=True,
+            wait_timeout=90.0,
+        )
 
     async def _send_profile_response(self, peer_address: str) -> None:
         response = self._packet(
@@ -472,7 +484,12 @@ class Net:
             username=self.local_user.username,
             sent_at=self._now().isoformat(),
         )
-        await self._send_packet(peer_address, response, require_secure=True)
+        await self._send_packet_with_destination_retry(
+            peer_address,
+            response,
+            require_secure=True,
+            wait_timeout=90.0,
+        )
 
     async def _send_chat_ready(self, peer_address: str) -> None:
         if peer_address in self._chat_ready_sent:
@@ -483,7 +500,16 @@ class Net:
             username=self.local_user.username,
             sent_at=self._now().isoformat(),
         )
-        await self._send_packet(peer_address, packet, require_secure=True)
+        try:
+            await self._send_packet_with_destination_retry(
+                peer_address,
+                packet,
+                require_secure=True,
+                wait_timeout=90.0,
+            )
+        except Exception:
+            self._chat_ready_sent.discard(peer_address)
+            raise
 
     def _mark_chat_ready(self, peer_address: str, chat: Chat) -> None:
         waiter = self._chat_ready_waiters.get(peer_address)
@@ -727,6 +753,49 @@ class Net:
             secure_channel=secure_channel,
         )
 
+    async def _send_packet_with_destination_retry(
+        self,
+        peer_address: str,
+        packet: dict[str, Any],
+        *,
+        force_plain: bool = False,
+        require_secure: bool = False,
+        wait_timeout: float = 90.0,
+        retry_interval: float = 2.0,
+    ) -> None:
+        deadline = asyncio.get_running_loop().time() + wait_timeout
+        last_error: Exception | None = None
+
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                message = (
+                    f"Peer destination {peer_address} is not published in I2P yet "
+                    "or peer is offline"
+                )
+                if last_error is not None:
+                    raise NetStateError(message) from last_error
+                raise NetStateError(message)
+
+            try:
+                if not await self.probe_peer(peer_address):
+                    await asyncio.sleep(min(retry_interval, remaining))
+                    continue
+                await self._send_packet(
+                    peer_address,
+                    packet,
+                    force_plain=force_plain,
+                    require_secure=require_secure,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                if not self._is_retryable_destination_error(exc):
+                    raise
+                await asyncio.sleep(min(retry_interval, remaining))
+
     async def _receive_loop(self) -> None:
         while not self._closed:
             try:
@@ -821,7 +890,12 @@ class Net:
             TYPE_HANDSHAKE_REPLY,
             package=reply_package,
         )
-        await self._send_packet(peer_address, reply, force_plain=True)
+        await self._send_packet_with_destination_retry(
+            peer_address,
+            reply,
+            force_plain=True,
+            wait_timeout=90.0,
+        )
         return NetEvent(
             kind=EVENT_SECURE_READY,
             peer_address=peer_address,
@@ -1188,6 +1262,13 @@ class Net:
         user.is_online = True
         user.last_seen = self._now()
         user.save(only=[User.is_online, User.last_seen])
+
+    @staticmethod
+    def _is_retryable_destination_error(exc: Exception) -> bool:
+        if isinstance(exc, SAMProtocolError):
+            text = str(exc).lower()
+            return "leaseset not found" in text
+        return False
 
     def _packet(self, packet_type: str, **payload: Any) -> dict[str, Any]:
         packet = {

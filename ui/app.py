@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import os
 import shutil
@@ -9,13 +10,14 @@ import sys
 from pathlib import Path
 from typing import Awaitable
 
-from db import MyProfile, Settings, User
+from db import Chat, Message, MyProfile, Settings, User
 from net.i2p_sam import SAM_HOST, SAM_PORT, SAMIdentity
 from net.net import EVENT_ERROR, EVENT_SECURE_READY, Net
 from rich.align import Align
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Static, TextArea
 
 from ui.auto_update import (
@@ -33,8 +35,23 @@ from ui.mixins import StartupMixin
 from ui.pages import quick_start
 
 
+class ChatListItem(Static):
+    def __init__(self, chat_id: int, renderable: Text, *, selected: bool) -> None:
+        classes = "chat-list-item"
+        if selected:
+            classes += " chat-list-item-selected"
+        super().__init__(renderable, classes=classes)
+        self.chat_id = chat_id
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        if hasattr(self.app, "_open_chat"):
+            self.app._open_chat(self.chat_id)
+
+
 class CMD_UI(StartupMixin, App):
     TITLE = "NeoSAM Messenger"
+    PEER_ONLINE_FRESH_SECONDS = 45
     CSS = """
     #startup-shell {
         width: 100%;
@@ -56,9 +73,95 @@ class CMD_UI(StartupMixin, App):
         height: 1;
     }
 
+    #network-header-text {
+        width: 1fr;
+        height: 1;
+        content-align: center middle;
+    }
+
+    #close-app {
+        width: auto;
+        height: 1;
+        min-width: 0;
+        padding: 0 1;
+    }
+
     #messenger-body {
         width: 100%;
         height: 1fr;
+    }
+
+    #messenger-layout {
+        width: 100%;
+        height: 100%;
+    }
+
+    #chat-sidebar {
+        width: 30%;
+        height: 100%;
+        padding: 1 1 0 1;
+    }
+
+    #chat-sidebar-title {
+        width: 100%;
+        height: auto;
+        text-style: bold;
+        content-align: center middle;
+        padding: 0 1;
+    }
+
+    #chat-sidebar-actions {
+        width: 100%;
+        height: auto;
+        align-horizontal: center;
+        padding: 0 0 1 0;
+    }
+
+    #chat-list-scroll {
+        width: 100%;
+        height: 1fr;
+        overflow-y: scroll;
+        overflow-x: hidden;
+        scrollbar-gutter: stable;
+        scrollbar-size-vertical: 1;
+        scrollbar-background: white;
+        scrollbar-background-hover: white;
+        scrollbar-background-active: white;
+        scrollbar-color: white;
+        scrollbar-color-hover: white;
+        scrollbar-color-active: white;
+    }
+
+    #chat-list-items {
+        width: 100%;
+        height: auto;
+    }
+
+    .chat-list-item {
+        width: 100%;
+        height: auto;
+        padding: 0 1;
+        margin: 0 0 1 0;
+        background: transparent;
+    }
+
+    .chat-list-item:hover {
+        background: rgb(60,60,60);
+    }
+
+    .chat-list-item-selected {
+        background: rgb(60,60,60);
+    }
+
+    .chat-list-empty {
+        width: 100%;
+        height: auto;
+        padding: 0 1;
+    }
+
+    #chat-workspace {
+        width: 1fr;
+        height: 100%;
     }
 
     .app-screen {
@@ -71,19 +174,48 @@ class CMD_UI(StartupMixin, App):
         height: 100%;
     }
 
-    #chat-home-top-spacer {
-        height: 1fr;
+    #chat-home-placeholder {
+        width: 100%;
+        height: 100%;
+        content-align: center middle;
+        text-style: bold;
+        padding: 0 2;
     }
 
-    #chat-home-bottom-spacer {
-        height: 1fr;
+    #chat-message-scroll {
+        width: 100%;
+        height: 100%;
+        display: none;
+        padding: 1 2;
+        overflow-y: auto;
+        overflow-x: hidden;
     }
 
-    #chat-home-card {
+    #chat-message-items {
         width: 100%;
         height: auto;
-        align-horizontal: center;
-        padding: 0 2;
+    }
+
+    .chat-message {
+        width: 100%;
+        height: auto;
+        padding: 0 1;
+        margin: 0 0 1 0;
+    }
+
+    .chat-message-own {
+        background: rgb(32,32,32);
+    }
+
+    .chat-message-peer {
+        background: $surface;
+    }
+
+    .chat-message-empty {
+        width: 100%;
+        height: auto;
+        content-align: center middle;
+        padding: 1 0;
     }
 
     #new-chat-screen {
@@ -236,6 +368,7 @@ class CMD_UI(StartupMixin, App):
         self.startup_active = False
         self.current_view = "home"
         self.new_chat_mode: str | None = None
+        self.selected_chat_id: int | None = None
 
         self.settings_row: Settings | None = None
         self.project_root = Path(__file__).resolve().parents[1]
@@ -249,66 +382,80 @@ class CMD_UI(StartupMixin, App):
         self._network_status_task: asyncio.Task[None] | None = None
         self._net_event_task: asyncio.Task[None] | None = None
         self._net_init_task: asyncio.Task[bool] | None = None
+        self._net_warmup_task: asyncio.Task[None] | None = None
         self._invite_action_task: asyncio.Task[None] | None = None
         self._auto_update_task: asyncio.Task[None] | None = None
+        self._presence_task: asyncio.Task[None] | None = None
 
     def compose(self) -> ComposeResult:
         with Container(id="startup-shell"):
             yield Container(id="startup-pages")
 
         with Vertical(id="app-shell"):
-            yield Static(Align.center("нет подключения"), id="network-header")
+            with Horizontal(id="network-header"):
+                yield Static(Align.center("нет подключения"), id="network-header-text")
+                yield Button("[ закрыть ]", id="close-app", classes="page-button")
             with Container(id="messenger-body"):
-                with Vertical(id="chat-home-screen", classes="app-screen"):
-                    yield Static(id="chat-home-top-spacer")
-                    with Vertical(id="chat-home-card"):
-                        yield Button("[ новый чат ]", id="open-new-chat", classes="page-button")
-                    yield Static(id="chat-home-bottom-spacer")
+                with Horizontal(id="messenger-layout"):
+                    with Vertical(id="chat-sidebar"):
+                        yield Static("Чаты", id="chat-sidebar-title")
+                        with Horizontal(id="chat-sidebar-actions"):
+                            yield Button("[ новый чат ]", id="open-new-chat", classes="page-button")
+                        with VerticalScroll(id="chat-list-scroll"):
+                            yield Vertical(id="chat-list-items")
+                    with Vertical(id="chat-workspace"):
+                        with Vertical(id="chat-home-screen", classes="app-screen"):
+                            yield Static(
+                                "Здесь будет открыт выбранный чат.",
+                                id="chat-home-placeholder",
+                            )
+                            with VerticalScroll(id="chat-message-scroll"):
+                                yield Vertical(id="chat-message-items")
 
-                with Vertical(id="new-chat-screen", classes="app-screen"):
-                    with Horizontal(id="new-chat-back-row"):
-                        yield Button(
-                            "[ вернуться к чатам ]",
-                            id="back-to-chats",
-                            classes="page-button",
-                        )
-                    yield Static(id="new-chat-top-spacer")
-                    with Vertical(id="new-chat-card"):
-                        yield Static("Новый чат", id="new-chat-title")
-                        with Horizontal(id="new-chat-action-row"):
-                            yield Button("[ создать чат ]", id="create-chat", classes="page-button")
-                            yield Button(
-                                "[ подключиться к чату ]",
-                                id="show-join-chat",
-                                classes="page-button",
-                            )
-                        with Vertical(id="create-chat-panel", classes="page-panel"):
-                            yield Static("invite json", classes="page-label")
-                            yield Static("", id="invite-json")
-                            yield Button(
-                                "[ копировать invite ]",
-                                id="copy-invite",
-                                classes="page-button",
-                                disabled=True,
-                            )
-                        with Vertical(id="join-chat-panel", classes="page-panel"):
-                            yield Static("вставь invite json", classes="page-label")
-                            yield TextArea(
-                                "",
-                                id="invite-input",
-                                compact=True,
-                                placeholder="invite JSON",
-                                show_line_numbers=False,
-                            )
-                            yield Button(
-                                "[ подключиться ]",
-                                id="invite-submit",
-                                classes="page-button",
-                                disabled=True,
-                            )
-                            yield Static("", id="join-error")
-                        yield Static("", id="new-chat-status")
-                    yield Static(id="new-chat-bottom-spacer")
+                        with Vertical(id="new-chat-screen", classes="app-screen"):
+                            with Horizontal(id="new-chat-back-row"):
+                                yield Button(
+                                    "[ вернуться к чатам ]",
+                                    id="back-to-chats",
+                                    classes="page-button",
+                                )
+                            yield Static(id="new-chat-top-spacer")
+                            with Vertical(id="new-chat-card"):
+                                yield Static("Новый чат", id="new-chat-title")
+                                with Horizontal(id="new-chat-action-row"):
+                                    yield Button("[ создать чат ]", id="create-chat", classes="page-button")
+                                    yield Button(
+                                        "[ подключиться к чату ]",
+                                        id="show-join-chat",
+                                        classes="page-button",
+                                    )
+                                with Vertical(id="create-chat-panel", classes="page-panel"):
+                                    yield Static("invite json", classes="page-label")
+                                    yield Static("", id="invite-json")
+                                    yield Button(
+                                        "[ копировать invite ]",
+                                        id="copy-invite",
+                                        classes="page-button",
+                                        disabled=True,
+                                    )
+                                with Vertical(id="join-chat-panel", classes="page-panel"):
+                                    yield Static("вставь invite json", classes="page-label")
+                                    yield TextArea(
+                                        "",
+                                        id="invite-input",
+                                        compact=True,
+                                        placeholder="invite JSON",
+                                        show_line_numbers=False,
+                                    )
+                                    yield Button(
+                                        "[ подключиться ]",
+                                        id="invite-submit",
+                                        classes="page-button",
+                                        disabled=True,
+                                    )
+                                    yield Static("", id="join-error")
+                                yield Static("", id="new-chat-status")
+                            yield Static(id="new-chat-bottom-spacer")
             with Horizontal(id="profile-footer"):
                 yield Static("- | Sam ip: -", id="profile-footer-left")
                 yield Static(self.update_status, id="profile-footer-right")
@@ -318,6 +465,7 @@ class CMD_UI(StartupMixin, App):
         self.startup_active = bool(self.startup_page_classes) and not self.settings_row.initialized
         self.query_one("#app-shell", Vertical).display = False
         self.query_one("#startup-shell", Container).display = False
+        self._refresh_chat_sidebar()
         self._show_chat_home()
 
         if self.startup_active:
@@ -341,6 +489,18 @@ class CMD_UI(StartupMixin, App):
             self._invite_action_task.cancel()
             try:
                 await self._invite_action_task
+            except asyncio.CancelledError:
+                pass
+        if self._presence_task:
+            self._presence_task.cancel()
+            try:
+                await self._presence_task
+            except asyncio.CancelledError:
+                pass
+        if self._net_warmup_task:
+            self._net_warmup_task.cancel()
+            try:
+                await self._net_warmup_task
             except asyncio.CancelledError:
                 pass
         if self._auto_update_task:
@@ -377,6 +537,7 @@ class CMD_UI(StartupMixin, App):
             return
 
         await self._ensure_local_identity_and_profile(allow_create=True)
+        self._refresh_chat_sidebar()
         self._refresh_profile_footer()
         self.query_one("#app-shell", Vertical).display = True
         self._show_chat_home()
@@ -384,6 +545,7 @@ class CMD_UI(StartupMixin, App):
             self._network_status_task = asyncio.create_task(self._network_status_loop())
         if self._auto_update_task is None or self._auto_update_task.done():
             self._auto_update_task = asyncio.create_task(self._run_auto_update())
+        self._start_net_background()
 
     async def _finish_startup(self) -> None:
         if self.settings_row and not self.settings_row.initialized:
@@ -411,6 +573,10 @@ class CMD_UI(StartupMixin, App):
 
         if button_id == "open-new-chat":
             self._show_new_chat_screen(reset=True)
+            return
+
+        if button_id == "close-app":
+            self.exit()
             return
 
         if button_id == "back-to-chats":
@@ -456,7 +622,7 @@ class CMD_UI(StartupMixin, App):
     async def _network_status_loop(self) -> None:
         while True:
             status = await collect_i2p_status()
-            self.query_one("#network-header", Static).update(
+            self.query_one("#network-header-text", Static).update(
                 self._format_network_header(status)
             )
             self._refresh_profile_footer()
@@ -521,7 +687,60 @@ class CMD_UI(StartupMixin, App):
 
         if self._net_event_task is None or self._net_event_task.done():
             self._net_event_task = asyncio.create_task(self._net_event_loop())
+        self._start_presence_loop()
         return True
+
+    def _start_net_background(self) -> None:
+        if self._net_warmup_task is None or self._net_warmup_task.done():
+            self._net_warmup_task = asyncio.create_task(self._warmup_net())
+
+    async def _warmup_net(self) -> None:
+        try:
+            await self._ensure_net_started()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    def _start_presence_loop(self) -> None:
+        if self._presence_task is None or self._presence_task.done():
+            self._presence_task = asyncio.create_task(self._presence_loop())
+
+    async def _presence_loop(self) -> None:
+        while True:
+            if self.net is not None:
+                try:
+                    local_user_id = self.net.local_user.id
+                    peer_addresses: list[str] = []
+                    sidebar_changed = False
+                    for chat in self.net.list_chats():
+                        if chat.user1_id == local_user_id:
+                            peer_addresses.append(chat.user2.address)
+                        else:
+                            peer_addresses.append(chat.user1.address)
+
+                    for peer_address in dict.fromkeys(peer_addresses):
+                        try:
+                            if not await self.net.probe_peer(peer_address):
+                                sidebar_changed = self._mark_peer_offline(peer_address) or sidebar_changed
+                                continue
+                            await self.net.send_online_ping(peer_address)
+                        except Exception:
+                            sidebar_changed = self._mark_peer_offline(peer_address) or sidebar_changed
+                            continue
+
+                    changed_count = await self.net.mark_stale_users_offline(
+                        threshold_seconds=self.PEER_ONLINE_FRESH_SECONDS
+                    )
+                    sidebar_changed = bool(changed_count) or sidebar_changed
+                    if sidebar_changed:
+                        self._refresh_chat_sidebar()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+
+            await asyncio.sleep(30)
 
     async def _net_event_loop(self) -> None:
         while True:
@@ -540,6 +759,8 @@ class CMD_UI(StartupMixin, App):
                 continue
 
             if event.kind == EVENT_SECURE_READY:
+                self._refresh_chat_sidebar()
+                self._refresh_open_chat()
                 self._update_new_chat_status(
                     f"Защищённый канал готов: {self._format_address(event.peer_address)}"
                 )
@@ -548,6 +769,10 @@ class CMD_UI(StartupMixin, App):
             if event.kind == EVENT_ERROR:
                 error = event.payload.get("error", "unknown")
                 self._update_new_chat_status(f"Ошибка сети: {error}")
+                continue
+
+            self._refresh_chat_sidebar()
+            self._refresh_open_chat()
 
     async def _handle_create_chat(self) -> None:
         self._set_new_chat_mode("create")
@@ -593,7 +818,7 @@ class CMD_UI(StartupMixin, App):
         try:
             await asyncio.wait_for(
                 self.net.connect_with_invite(invite),
-                timeout=60.0,
+                timeout=120.0,
             )
         except TimeoutError:
             self._update_join_error("Не удалось подключиться к чату: timeout.")
@@ -609,6 +834,7 @@ class CMD_UI(StartupMixin, App):
         self._update_new_chat_status(
             f"Invite принят. Ответ отправлен на {self._format_address(str(peer_address))}."
         )
+        self._refresh_chat_sidebar()
         self._show_chat_home()
 
     async def _ensure_local_identity_and_profile(
@@ -707,6 +933,166 @@ class CMD_UI(StartupMixin, App):
             f"{self._format_username(username)} | Sam ip: {self._format_address(address)}"
         )
 
+    def _refresh_chat_sidebar(self) -> None:
+        profile = MyProfile.select().first()
+        if profile is None:
+            try:
+                items = self.query_one("#chat-list-items", Vertical)
+                items.remove_children()
+                items.mount(Static("Чатов пока нет.", classes="chat-list-empty"))
+            except Exception:
+                pass
+            return
+
+        local_user = profile.user
+        chats = (
+            Chat.select()
+            .where((Chat.user1 == local_user) | (Chat.user2 == local_user))
+            .order_by(Chat.created_at.desc())
+        )
+
+        items = None
+        try:
+            items = self.query_one("#chat-list-items", Vertical)
+            items.remove_children()
+        except Exception:
+            return
+
+        widgets: list[Static] = []
+        chat_ids: list[int] = []
+        for chat in chats:
+            chat_ids.append(chat.id)
+            peer = chat.user2 if chat.user1_id == local_user.id else chat.user1
+            last_message = (
+                Message.select()
+                .where(Message.chat == chat)
+                .order_by(Message.sent_at.desc())
+                .first()
+            )
+            preview = "(нет сообщений)"
+            preview_text = Text(preview, style="dim")
+            if last_message and last_message.text:
+                preview = last_message.text.replace("\n", " ").strip()
+                if len(preview) > 36:
+                    preview = preview[:33] + "..."
+                preview_text = Text(preview, style="dim")
+                preview_text.append(
+                    f"  {self._format_message_stamp(last_message.sent_at)}",
+                    style="grey70",
+                )
+            is_online = self._peer_is_online(peer)
+            status_dot = Text("● ", style="green" if is_online else "grey50")
+            username = Text(peer.username, style="bold bright_white")
+            renderable = Text()
+            renderable.append_text(status_dot)
+            renderable.append_text(username)
+            renderable.append("\n")
+            renderable.append_text(preview_text)
+            widgets.append(
+                ChatListItem(
+                    chat.id,
+                    renderable,
+                    selected=chat.id == self.selected_chat_id,
+                )
+            )
+
+        if self.selected_chat_id is not None and self.selected_chat_id not in chat_ids:
+            self.selected_chat_id = None
+
+        if not widgets:
+            widgets = [Static("Чатов пока нет.", classes="chat-list-empty")]
+
+        items.mount(*widgets)
+
+    def _peer_is_online(self, peer: User) -> bool:
+        if self.net is None or self.net_error:
+            self._mark_peer_offline(peer.address)
+            return False
+
+        if not peer.is_online:
+            return False
+
+        cutoff = dt.datetime.now() - dt.timedelta(seconds=self.PEER_ONLINE_FRESH_SECONDS)
+        if peer.last_seen < cutoff:
+            self._mark_peer_offline(peer.address)
+            return False
+
+        return True
+
+    @staticmethod
+    def _mark_peer_offline(peer_address: str) -> bool:
+        peer = User.get_or_none(User.address == peer_address)
+        if peer is None or not peer.is_online:
+            return False
+        peer.is_online = False
+        peer.save(only=[User.is_online])
+        return True
+
+    @staticmethod
+    def _format_message_stamp(sent_at: dt.datetime) -> str:
+        now = dt.datetime.now(sent_at.tzinfo) if sent_at.tzinfo else dt.datetime.now()
+        if sent_at.date() == now.date():
+            return sent_at.strftime("%H:%M")
+        return sent_at.strftime("%d.%m")
+
+    def _open_chat(self, chat_id: int) -> None:
+        self.selected_chat_id = chat_id
+        self._show_chat_home()
+
+    def _refresh_open_chat(self) -> None:
+        try:
+            placeholder = self.query_one("#chat-home-placeholder", Static)
+            scroll = self.query_one("#chat-message-scroll", VerticalScroll)
+            items = self.query_one("#chat-message-items", Vertical)
+        except Exception:
+            return
+
+        items.remove_children()
+        profile = MyProfile.select().first()
+        local_user = profile.user if profile is not None else None
+
+        if self.selected_chat_id is None or local_user is None:
+            placeholder.update("Здесь будет открыт выбранный чат.")
+            placeholder.display = True
+            scroll.display = False
+            return
+
+        chat = Chat.get_or_none(Chat.id == self.selected_chat_id)
+        if chat is None or (chat.user1_id != local_user.id and chat.user2_id != local_user.id):
+            self.selected_chat_id = None
+            placeholder.update("Здесь будет открыт выбранный чат.")
+            placeholder.display = True
+            scroll.display = False
+            return
+
+        peer = chat.user2 if chat.user1_id == local_user.id else chat.user1
+        placeholder.display = False
+        scroll.display = True
+
+        messages = (
+            Message.select()
+            .where(Message.chat == chat)
+            .order_by(Message.sent_at.asc())
+        )
+
+        widgets: list[Static] = []
+        for message in messages:
+            sender_name = "Вы" if message.sender_id == local_user.id else (message.sender.username or peer.username)
+            header = Text(sender_name, style="bold bright_white")
+            header.append(f"  {self._format_message_stamp(message.sent_at)}", style="grey70")
+            body = Text(message.text or "(пустое сообщение)")
+            renderable = Text()
+            renderable.append_text(header)
+            renderable.append("\n")
+            renderable.append_text(body)
+            classes = "chat-message chat-message-own" if message.sender_id == local_user.id else "chat-message chat-message-peer"
+            widgets.append(Static(renderable, classes=classes))
+
+        if not widgets:
+            widgets = [Static("Сообщений пока нет.", classes="chat-message-empty")]
+
+        items.mount(*widgets)
+
     def _update_auto_update_status(self, text: str) -> None:
         self.update_status = text
         try:
@@ -756,6 +1142,8 @@ class CMD_UI(StartupMixin, App):
     def _show_chat_home(self) -> None:
         self.current_view = "home"
         self.new_chat_mode = None
+        self._refresh_chat_sidebar()
+        self._refresh_open_chat()
         try:
             self.query_one("#chat-home-screen", Vertical).display = True
             self.query_one("#new-chat-screen", Vertical).display = False
