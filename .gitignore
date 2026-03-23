@@ -212,3 +212,4 @@ VERSION
 .VERSION
 net/.sam_identity.json
 my_database.db
+logs/

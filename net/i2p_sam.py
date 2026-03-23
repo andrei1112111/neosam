@@ -5,13 +5,19 @@ import contextlib
 import json
 import secrets
 import shlex
+import sys
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 
 SAM_HOST = "127.0.0.1"
 SAM_PORT = 7656
 SAM_HELLO = b"HELLO VERSION MIN=3.1 MAX=3.1\n"
+SAM_INBOUND_QUANTITY = 1
+SAM_OUTBOUND_QUANTITY = 1
+SAM_LOG_PATH = Path(__file__).resolve().parents[1] / "logs" / "sam.log"
 
 WIRE_SCHEMA = "neosam-wire"
 PLAIN_MODE = "plain"
@@ -144,13 +150,17 @@ class SAMTransport:
             command = (
                 f"SESSION CREATE STYLE=STREAM ID={self.session_id} "
                 f"DESTINATION={self.identity.private_destination} "
-                "i2cp.leaseSetEncType=4,0 inbound.quantity=3 outbound.quantity=3\n"
+                "i2cp.leaseSetEncType=4,0 "
+                f"inbound.quantity={SAM_INBOUND_QUANTITY} "
+                f"outbound.quantity={SAM_OUTBOUND_QUANTITY}\n"
             )
+            _sam_debug(f"-> {command.strip()}")
             writer.write(command.encode())
             await writer.drain()
 
             response = await reader.readline()
             text, fields = _parse_sam_line(response)
+            _sam_debug(f"<- {text}")
             if fields.get("RESULT") != "OK":
                 raise SAMProtocolError(f"SESSION CREATE failed: {text}")
         except Exception:
@@ -192,11 +202,13 @@ class SAMTransport:
                 f"STREAM CONNECT ID={self.session_id} "
                 f"DESTINATION={destination} SILENT=false\n"
             )
+            _sam_debug(f"-> {command.strip()}")
             writer.write(command.encode())
             await writer.drain()
 
             response = await reader.readline()
             text, fields = _parse_sam_line(response)
+            _sam_debug(f"<- {text}")
             if fields.get("RESULT") != "OK":
                 raise SAMProtocolError(f"STREAM CONNECT failed: {text}")
 
@@ -216,11 +228,13 @@ class SAMTransport:
                 f"STREAM CONNECT ID={self.session_id} "
                 f"DESTINATION={destination} SILENT=false\n"
             )
+            _sam_debug(f"-> {command.strip()}")
             writer.write(command.encode())
             await writer.drain()
 
             response = await reader.readline()
-            _, fields = _parse_sam_line(response)
+            text, fields = _parse_sam_line(response)
+            _sam_debug(f"<- {text}")
             return fields.get("RESULT") == "OK"
         except Exception:
             return False
@@ -251,17 +265,21 @@ class SAMTransport:
                 reader, writer = await _open_sam_socket(self.sam_host, self.sam_port)
                 await _sam_hello(reader, writer)
 
-                writer.write(f"STREAM ACCEPT ID={self.session_id} SILENT=false\n".encode())
+                command = f"STREAM ACCEPT ID={self.session_id} SILENT=false\n"
+                _sam_debug(f"-> {command.strip()}")
+                writer.write(command.encode())
                 await writer.drain()
 
                 response = await reader.readline()
                 text, fields = _parse_sam_line(response)
+                _sam_debug(f"<- {text}")
                 if fields.get("RESULT") != "OK":
                     raise SAMProtocolError(f"STREAM ACCEPT failed: {text}")
 
                 sender_line = await reader.readline()
                 if not sender_line:
                     raise SAMProtocolError("SAM closed ACCEPT before sending peer destination")
+                _sam_debug(f"<- PEER {sender_line.decode().strip()}")
 
                 sender_destination = sender_line.decode().strip().split(" ", 1)[0]
                 payload = (await reader.read()).decode().strip()
@@ -370,11 +388,14 @@ async def generate_sam_identity(
     reader, writer = await _open_sam_socket(sam_host, sam_port)
     try:
         await _sam_hello(reader, writer)
-        writer.write(b"DEST GENERATE SIGNATURE_TYPE=7\n")
+        command = "DEST GENERATE SIGNATURE_TYPE=7\n"
+        _sam_debug(f"-> {command.strip()}")
+        writer.write(command.encode())
         await writer.drain()
 
         response = await reader.readline()
         text, fields = _parse_sam_line(response)
+        _sam_debug(f"<- {text}")
         public_destination = fields.get("PUB")
         private_destination = fields.get("PRIV")
         if not public_destination or not private_destination:
@@ -394,10 +415,12 @@ async def _open_sam_socket(
 
 
 async def _sam_hello(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    _sam_debug(f"-> {SAM_HELLO.decode().strip()}")
     writer.write(SAM_HELLO)
     await writer.drain()
     response = await reader.readline()
     text, fields = _parse_sam_line(response)
+    _sam_debug(f"<- {text}")
     if fields.get("RESULT") != "OK":
         raise SAMProtocolError(f"SAM handshake failed: {text}")
 
@@ -441,13 +464,26 @@ def _require_int(payload: dict[str, Any], key: str, *, default: int | None = Non
     return value
 
 
+def _sam_debug(message: str) -> None:
+    line = f"{datetime.now().isoformat(timespec='seconds')} [SAM] {message}"
+    print(line, file=sys.stderr, flush=True)
+    try:
+        SAM_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SAM_LOG_PATH.open("a", encoding="utf-8") as log_file:
+            log_file.write(line + "\n")
+    except Exception:
+        pass
+
+
 __all__ = [
     "ENCRYPTED_MODE",
     "PLAIN_MODE",
     "SAMError",
     "SAM_HOST",
+    "SAM_INBOUND_QUANTITY",
     "SAMIdentity",
     "SAMIncomingPacket",
+    "SAM_OUTBOUND_QUANTITY",
     "SAM_PORT",
     "SAMProtocolError",
     "SAMTransport",
