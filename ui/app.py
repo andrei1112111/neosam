@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import Awaitable
 
 from db import Chat, Message, MyProfile, Settings, User
-from net.i2p_sam import SAM_HOST, SAM_PORT, SAMIdentity
+from net.i2p_sam import SAMIdentity
+from net.i2pd_config import load_i2pd_config
 from net.net import EVENT_ERROR, EVENT_SECURE_READY, Net
+from net.open_port_upnp import open_port
 from rich.align import Align
 from rich.text import Text
 from textual import events
@@ -52,6 +54,7 @@ class ChatListItem(Static):
 class CMD_UI(StartupMixin, App):
     TITLE = "NeoSAM Messenger"
     PEER_ONLINE_FRESH_SECONDS = 45
+    I2PD_UPNP_PORT = 44444
     CSS = """
     #startup-shell {
         width: 100%;
@@ -373,13 +376,17 @@ class CMD_UI(StartupMixin, App):
         self.settings_row: Settings | None = None
         self.project_root = Path(__file__).resolve().parents[1]
         self.identity_path = Path("net/.sam_identity.json")
+        self.i2pd_config = load_i2pd_config(self.project_root / "i2pd.conf")
         self.auto_updater = AutoUpdater(project_root=self.project_root)
         self.net: Net | None = None
         self.net_error: str | None = None
         self.last_invite_json: str | None = None
         self.update_status = STATUS_CHECKING
+        self.network_status_checking = False
+        self._network_repair_attempted = False
         self._bootstrap_task: asyncio.Task[None] | None = None
         self._network_status_task: asyncio.Task[None] | None = None
+        self._network_repair_task: asyncio.Task[None] | None = None
         self._net_event_task: asyncio.Task[None] | None = None
         self._net_init_task: asyncio.Task[bool] | None = None
         self._net_warmup_task: asyncio.Task[None] | None = None
@@ -521,6 +528,12 @@ class CMD_UI(StartupMixin, App):
                 await self._network_status_task
             except asyncio.CancelledError:
                 pass
+        if self._network_repair_task:
+            self._network_repair_task.cancel()
+            try:
+                await self._network_repair_task
+            except asyncio.CancelledError:
+                pass
         if self._bootstrap_task:
             self._bootstrap_task.cancel()
             try:
@@ -621,7 +634,8 @@ class CMD_UI(StartupMixin, App):
 
     async def _network_status_loop(self) -> None:
         while True:
-            status = await collect_i2p_status()
+            status = await collect_i2p_status(config=self.i2pd_config)
+            self._maybe_start_network_repair(status)
             self.query_one("#network-header-text", Static).update(
                 self._format_network_header(status)
             )
@@ -657,8 +671,8 @@ class CMD_UI(StartupMixin, App):
         try:
             self.net = await Net.create(
                 identity_path=self.identity_path,
-                sam_host=SAM_HOST,
-                sam_port=SAM_PORT,
+                sam_host=self.i2pd_config.sam_host,
+                sam_port=self.i2pd_config.sam_port,
                 username="User",
                 autostart=False,
             )
@@ -860,8 +874,8 @@ class CMD_UI(StartupMixin, App):
         try:
             identity = await asyncio.wait_for(
                 SAMIdentity.create(
-                    sam_host=SAM_HOST,
-                    sam_port=SAM_PORT,
+                    sam_host=self.i2pd_config.sam_host,
+                    sam_port=self.i2pd_config.sam_port,
                 ),
                 timeout=5.0,
             )
@@ -1260,11 +1274,59 @@ class CMD_UI(StartupMixin, App):
         finally:
             self._set_new_chat_controls_busy(False)
 
-    @staticmethod
-    def _format_network_header(status: dict[str, str]):
+    def _format_network_header(self, status: dict[str, str]):
         if status.get("connected") != "1":
             return Align.center(Text("нет подключения", style="bold red"))
-        return format_i2p_header(status)
+        return format_i2p_header(status, network_checking=self.network_status_checking)
+
+    def _maybe_start_network_repair(self, status: dict[str, str]) -> None:
+        if status.get("connected") != "1":
+            self.network_status_checking = False
+            self._network_repair_attempted = False
+            return
+
+        network_status = status.get("network_status", "").strip().lower()
+        if network_status != "firewalled":
+            self.network_status_checking = False
+            self._network_repair_attempted = False
+            return
+
+        if self.network_status_checking:
+            return
+        if self._network_repair_attempted:
+            return
+        if self._network_repair_task is not None and not self._network_repair_task.done():
+            return
+
+        self.network_status_checking = True
+        self._network_repair_attempted = True
+        self._network_repair_task = asyncio.create_task(self._run_network_repair())
+
+    async def _run_network_repair(self) -> None:
+        tcp_port = self.i2pd_config.incoming_tcp_port(self.I2PD_UPNP_PORT)
+        udp_port = self.i2pd_config.incoming_udp_port(self.I2PD_UPNP_PORT)
+        try:
+            if tcp_port is not None:
+                await asyncio.to_thread(
+                    open_port,
+                    tcp_port,
+                    "TCP",
+                    "i2pd ntcp2",
+                )
+            if udp_port is not None:
+                await asyncio.to_thread(
+                    open_port,
+                    udp_port,
+                    "UDP",
+                    "i2pd ssu2",
+                )
+            await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        finally:
+            self.network_status_checking = False
 
     @staticmethod
     def _format_username(username: str) -> str:

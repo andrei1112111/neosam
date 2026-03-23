@@ -6,14 +6,25 @@ import re
 import urllib.error
 import urllib.request
 from html import unescape
+from pathlib import Path
 
+from net.i2pd_config import I2PDConfig, load_i2pd_config
 from rich.text import Text
 
 
-async def collect_i2p_status() -> dict[str, str]:
+async def collect_i2p_status(
+    *,
+    config: I2PDConfig | None = None,
+    config_path: str | Path | None = None,
+) -> dict[str, str]:
+    i2pd_config = config or load_i2pd_config(config_path)
     zero_metrics = zero_i2p_status()
-    sam_ok = await _check_sam()
-    html = await asyncio.to_thread(_fetch_http_page)
+    sam_ok = await _check_sam(i2pd_config.sam_host, i2pd_config.sam_port)
+    html = await asyncio.to_thread(
+        _fetch_http_page,
+        i2pd_config.http_host,
+        i2pd_config.http_port,
+    )
 
     if not sam_ok or not html:
         zero_metrics["summary"] = "Состояние: подключения нет"
@@ -24,11 +35,13 @@ async def collect_i2p_status() -> dict[str, str]:
     return metrics
 
 
-def format_i2p_header(status: dict[str, str]) -> Text:
+def format_i2p_header(status: dict[str, str], *, network_checking: bool = False) -> Text:
     tqsr_value = status["tunnel_success_rate"]
     routers_value = status["routers"]
     floodfills_value = status["floodfills"]
     header = Text()
+    header.append_text(_network_status_text(status, checking=network_checking))
+    header.append(" | ")
     header.append(
         f"TQSR {tqsr_value}",
         style=_tqsr_style(tqsr_value),
@@ -52,6 +65,7 @@ def zero_i2p_status() -> dict[str, str]:
     return {
         "summary": "Состояние: подключения нет",
         "connected": "0",
+        "network_status": "0",
         "tunnel_success_rate": "0",
         "received": "0",
         "sent": "0",
@@ -62,11 +76,11 @@ def zero_i2p_status() -> dict[str, str]:
     }
 
 
-async def _check_sam() -> bool:
+async def _check_sam(host: str, port: int) -> bool:
     writer = None
     try:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection("127.0.0.1", 7656),
+            asyncio.open_connection(host, port),
             timeout=2.0,
         )
         writer.write(b"HELLO VERSION MIN=3.1 MAX=3.1\n")
@@ -82,8 +96,8 @@ async def _check_sam() -> bool:
                 await writer.wait_closed()
 
 
-def _fetch_http_page() -> str | None:
-    for url in ("http://127.0.0.1:7070/stats", "http://127.0.0.1:7070/"):
+def _fetch_http_page(host: str, port: int) -> str | None:
+    for url in (f"http://{host}:{port}/stats", f"http://{host}:{port}/"):
         try:
             with urllib.request.urlopen(url, timeout=2.0) as response:
                 charset = response.headers.get_content_charset() or "utf-8"
@@ -98,6 +112,7 @@ def _parse_metrics(html: str) -> dict[str, str]:
     return {
         "summary": "Состояние: подключение есть",
         "connected": "1",
+        "network_status": _find_network_status(text),
         "tunnel_success_rate": _find_value(
             text,
             (
@@ -140,6 +155,40 @@ def _find_value(text: str, patterns: tuple[str, ...]) -> str:
         if match:
             return match.group(1).strip()
     return "0"
+
+
+def _find_network_status(text: str) -> str:
+    match = re.search(
+        r"Network status\s*:?\s*(Firewalled\s*-\s*Symmetric NAT|Firewalled|ok)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return "0"
+    raw = match.group(1).strip()
+    normalized = raw.lower()
+    if normalized == "ok":
+        return "ok"
+    if "symmetric nat" in normalized:
+        return "Firewalled - Symmetric NAT"
+    if normalized == "firewalled":
+        return "Firewalled"
+    return raw
+
+
+def _network_status_text(status: dict[str, str], *, checking: bool) -> Text:
+    if checking:
+        return Text("проверка сети...", style="yellow")
+
+    raw = status.get("network_status", "0")
+    normalized = raw.strip().lower()
+    if normalized == "ok":
+        return Text("ok", style="green")
+    if normalized == "firewalled - symmetric nat":
+        return Text("Symmetric NAT", style="yellow")
+    if normalized == "firewalled":
+        return Text("Firewalled", style="red")
+    return Text("unknown")
 
 
 def _tqsr_style(value: str) -> str:
