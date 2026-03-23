@@ -14,7 +14,7 @@ from pathlib import Path
 GITHUB_API_LATEST_RELEASE = (
     "https://api.github.com/repos/andrei1112111/neosam/releases/latest"
 )
-REQUIRED_RELEASE_TAG_PREFIX = "reliase"
+REQUIRED_RELEASE_TAG_PREFIX = "release"
 PENDING_UPDATE_FILE = ".update_pending.json"
 
 STATUS_CHECKING = "проверяем наличие обновлений..."
