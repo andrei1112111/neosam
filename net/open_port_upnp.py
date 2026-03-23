@@ -4,6 +4,7 @@ except ModuleNotFoundError:
     miniupnpc = None
 
 def open_port(port, protocol='TCP', description='i2pd port'):
+    return
     if miniupnpc is None:
         return "Ошибка: miniupnpc не установлен."
 
@@ -36,3 +37,28 @@ def open_port(port, protocol='TCP', description='i2pd port'):
         if "Success" in str(e) or not str(e):
              return "Произошла странная ошибка macOS, но попробуйте проверить статус в i2pd."
         return f"Ошибка: {e}"
+
+
+def force_close(port):
+    return
+    upnp = miniupnpc.UPnP()
+    upnp.discoverdelay = 500
+    try:
+        upnp.discover()
+        upnp.selectigd()
+        
+        # Пробуем удалить и TCP, и UDP (на всякий случай)
+        for proto in ['TCP', 'UDP']:
+            try:
+                res = upnp.deleteportmapping(port, proto)
+                print(f"Порт {port}/{proto}: {'Удален' if res else 'Уже отсутствует'}")
+            except Exception:
+                print(f"Порт {port}/{proto}: Не найден в таблице роутера.")
+                
+    except Exception as e:
+        print(f"Общая ошибка связи с роутером: {e}")
+
+# Список портов, которые мы "наследили"
+ports_to_clean = [44444, 7656]
+for p in ports_to_clean:
+    force_close(p)
