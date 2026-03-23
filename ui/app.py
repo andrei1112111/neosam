@@ -20,7 +20,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Static, TextArea
+from textual.widgets import Button, Input, Static, TextArea
 
 from ui.auto_update import (
     AutoUpdater,
@@ -179,7 +179,7 @@ class CMD_UI(StartupMixin, App):
 
     #chat-home-placeholder {
         width: 100%;
-        height: 100%;
+        height: 1fr;
         content-align: center middle;
         text-style: bold;
         padding: 0 2;
@@ -187,7 +187,7 @@ class CMD_UI(StartupMixin, App):
 
     #chat-message-scroll {
         width: 100%;
-        height: 100%;
+        height: 1fr;
         display: none;
         padding: 1 2;
         overflow-y: auto;
@@ -219,6 +219,32 @@ class CMD_UI(StartupMixin, App):
         height: auto;
         content-align: center middle;
         padding: 1 0;
+    }
+
+    #chat-compose {
+        width: 100%;
+        height: auto;
+        display: none;
+        padding: 0 2 1 2;
+    }
+
+    #chat-input {
+        width: 1fr;
+        margin-right: 1;
+        background: $surface;
+        border: solid $primary;
+    }
+
+    #send-message {
+        width: auto;
+        min-width: 0;
+    }
+
+    #chat-send-status {
+        width: 100%;
+        height: auto;
+        color: $error;
+        padding: 0 2 1 2;
     }
 
     #new-chat-screen {
@@ -391,6 +417,7 @@ class CMD_UI(StartupMixin, App):
         self._net_init_task: asyncio.Task[bool] | None = None
         self._net_warmup_task: asyncio.Task[None] | None = None
         self._invite_action_task: asyncio.Task[None] | None = None
+        self._message_send_task: asyncio.Task[None] | None = None
         self._auto_update_task: asyncio.Task[None] | None = None
         self._presence_task: asyncio.Task[None] | None = None
 
@@ -418,6 +445,15 @@ class CMD_UI(StartupMixin, App):
                             )
                             with VerticalScroll(id="chat-message-scroll"):
                                 yield Vertical(id="chat-message-items")
+                            with Horizontal(id="chat-compose"):
+                                yield Input(placeholder="Сообщение", id="chat-input")
+                                yield Button(
+                                    "[ отправить ]",
+                                    id="send-message",
+                                    classes="page-button",
+                                    disabled=True,
+                                )
+                            yield Static("", id="chat-send-status")
 
                         with Vertical(id="new-chat-screen", classes="app-screen"):
                             with Horizontal(id="new-chat-back-row"):
@@ -496,6 +532,12 @@ class CMD_UI(StartupMixin, App):
             self._invite_action_task.cancel()
             try:
                 await self._invite_action_task
+            except asyncio.CancelledError:
+                pass
+        if self._message_send_task:
+            self._message_send_task.cancel()
+            try:
+                await self._message_send_task
             except asyncio.CancelledError:
                 pass
         if self._presence_task:
@@ -624,6 +666,11 @@ class CMD_UI(StartupMixin, App):
                 self._handle_join_chat(),
                 "Подключаюсь к чату...",
             )
+            return
+
+        if button_id == "send-message":
+            self._start_send_message()
+            return
 
     async def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id != "invite-input":
@@ -631,6 +678,18 @@ class CMD_UI(StartupMixin, App):
         self._update_join_submit_enabled()
         if event.text_area.text.strip():
             self._update_join_error("")
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "chat-input":
+            return
+        self._update_chat_send_enabled()
+        if event.input.value.strip():
+            self._update_chat_send_status("")
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "chat-input":
+            return
+        self._start_send_message()
 
     async def _network_status_loop(self) -> None:
         while True:
@@ -1058,6 +1117,7 @@ class CMD_UI(StartupMixin, App):
             placeholder = self.query_one("#chat-home-placeholder", Static)
             scroll = self.query_one("#chat-message-scroll", VerticalScroll)
             items = self.query_one("#chat-message-items", Vertical)
+            compose = self.query_one("#chat-compose", Horizontal)
         except Exception:
             return
 
@@ -1069,6 +1129,8 @@ class CMD_UI(StartupMixin, App):
             placeholder.update("Здесь будет открыт выбранный чат.")
             placeholder.display = True
             scroll.display = False
+            compose.display = False
+            self._update_chat_send_enabled()
             return
 
         chat = Chat.get_or_none(Chat.id == self.selected_chat_id)
@@ -1077,11 +1139,15 @@ class CMD_UI(StartupMixin, App):
             placeholder.update("Здесь будет открыт выбранный чат.")
             placeholder.display = True
             scroll.display = False
+            compose.display = False
+            self._update_chat_send_enabled()
             return
 
         peer = chat.user2 if chat.user1_id == local_user.id else chat.user1
         placeholder.display = False
         scroll.display = True
+        compose.display = True
+        self._update_chat_send_enabled()
 
         messages = (
             Message.select()
@@ -1106,6 +1172,117 @@ class CMD_UI(StartupMixin, App):
             widgets = [Static("Сообщений пока нет.", classes="chat-message-empty")]
 
         items.mount(*widgets)
+
+    def _start_send_message(self) -> None:
+        if self._message_send_task is not None and not self._message_send_task.done():
+            return
+
+        if self.selected_chat_id is None:
+            self._update_chat_send_status("Сначала выбери чат.")
+            return
+
+        try:
+            chat_input = self.query_one("#chat-input", Input)
+        except Exception:
+            return
+
+        if not chat_input.value.strip():
+            self._update_chat_send_status("Введите сообщение.")
+            self._update_chat_send_enabled()
+            return
+
+        self._set_chat_send_busy(True)
+        self._message_send_task = asyncio.create_task(self._run_send_message())
+
+    async def _run_send_message(self) -> None:
+        try:
+            chat, peer = self._get_selected_chat_peer()
+            if chat is None or peer is None:
+                self._update_chat_send_status("Чат не найден.")
+                return
+
+            if not await self._ensure_net_started():
+                self._update_chat_send_status(
+                    f"Нет подключения к сети: {self.net_error or 'i2p недоступен'}"
+                )
+                return
+
+            assert self.net is not None
+            if not self.net.has_secure_channel(peer.address):
+                self._update_chat_send_status("Нет защищённого канала с этим пользователем.")
+                return
+
+            chat_input = self.query_one("#chat-input", Input)
+            text = chat_input.value.strip()
+            if not text:
+                self._update_chat_send_status("Введите сообщение.")
+                return
+
+            await self.net.send_text(
+                peer.address,
+                text,
+                require_secure=True,
+            )
+            chat_input.value = ""
+            self._update_chat_send_status("")
+            self._refresh_chat_sidebar()
+            self._refresh_open_chat()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._update_chat_send_status(f"Не удалось отправить сообщение: {exc}")
+        finally:
+            self._set_chat_send_busy(False)
+
+    def _get_selected_chat_peer(self) -> tuple[Chat | None, User | None]:
+        if self.selected_chat_id is None:
+            return None, None
+
+        profile = MyProfile.select().first()
+        if profile is None:
+            return None, None
+
+        local_user = profile.user
+        chat = Chat.get_or_none(Chat.id == self.selected_chat_id)
+        if chat is None:
+            return None, None
+        if chat.user1_id != local_user.id and chat.user2_id != local_user.id:
+            return None, None
+
+        peer = chat.user2 if chat.user1_id == local_user.id else chat.user1
+        return chat, peer
+
+    def _set_chat_send_busy(self, busy: bool) -> None:
+        try:
+            chat_input = self.query_one("#chat-input", Input)
+            send_button = self.query_one("#send-message", Button)
+        except Exception:
+            return
+
+        chat_input.disabled = busy
+        if busy:
+            send_button.disabled = True
+            return
+        self._update_chat_send_enabled()
+
+    def _update_chat_send_enabled(self) -> None:
+        try:
+            chat_input = self.query_one("#chat-input", Input)
+            send_button = self.query_one("#send-message", Button)
+            compose = self.query_one("#chat-compose", Horizontal)
+        except Exception:
+            return
+
+        if not compose.display or chat_input.disabled:
+            send_button.disabled = True
+            return
+        send_button.disabled = not chat_input.value.strip()
+
+    def _update_chat_send_status(self, text: str) -> None:
+        try:
+            self.query_one("#chat-send-status", Static).update(text)
+        except Exception:
+            return
 
     def _update_auto_update_status(self, text: str) -> None:
         self.update_status = text
@@ -1158,6 +1335,7 @@ class CMD_UI(StartupMixin, App):
         self.new_chat_mode = None
         self._refresh_chat_sidebar()
         self._refresh_open_chat()
+        self._update_chat_send_status("")
         try:
             self.query_one("#chat-home-screen", Vertical).display = True
             self.query_one("#new-chat-screen", Vertical).display = False
